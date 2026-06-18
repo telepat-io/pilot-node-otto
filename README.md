@@ -1,9 +1,8 @@
 # pilot-node-otto — `io.telepat.otto`
 
 A containerized **Pilot Protocol app-store node** that exposes authenticated,
-real-browser automation by wrapping the telepat.io **otto** agent. **Free** node:
-no payment, no wallet. otto drives a real Chrome (no LLM tokens), so this node
-involves **no model/LLM key**.
+real-browser automation by wrapping the telepat.io **otto** agent. otto drives a
+real Chrome rather than calling an LLM, so this node needs **no model/LLM key**.
 
 ## What it is
 
@@ -14,7 +13,7 @@ wrapper spawns as a child in the same container and drives as an authenticated
 
 - **App id:** `io.telepat.otto`, `binary.runtime: "node"` (`app/manifest.json`).
 - **Capability:** dataexchange JSON frames on overlay port 1001.
-- **Role:** free provider — no payee/wallet, no quote/deliver.
+- **Role:** provider — the capability is served directly (no wallet/payment leg, no quote/deliver).
 
 ## otto's real topology (and where the browser lives)
 
