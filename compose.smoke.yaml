@@ -1,0 +1,121 @@
+# compose.smoke.yaml — local network for the io.telepat.otto regression test.
+#
+#   rendezvous (registry :9000 / beacon :9001 / dashboard :3000)
+#        ▲                         ▲
+#   provider-daemon            caller-daemon
+#     └─ io.telepat.otto (supervised; OUR app — listens dataexchange :1001)
+#          ├─ spawns `otto mcp` (stdio MCP controller) in-container
+#          └─ controller → otto-relay:8787  (HTTP+WS)
+#
+#   otto-relay (otto start --attached, :8787, published to the host so the
+#   operator's Chrome + the otto extension can pair against localhost:8787)
+#
+# The smoke test proves everything UP TO the browser: relay healthy, provider app
+# ready, the wrapper spawned `otto mcp`, the controller registered + logged in,
+# and an {op:"status"} round-trip returns relay health with browser_connected:false
+# (no browser node — that leg is the operator's, driven live by the lead).
+#
+# pilot-net is a normal bridge (NOT internal) so the relay port can be published
+# for pairing. The node makes no outbound internet calls of its own.
+name: otto-smoke
+
+networks:
+  pilot-net:
+    driver: bridge
+
+x-pilot-env: &pilot-env
+  HOME: /home/pilot
+  PILOT_SOCKET: /home/pilot/run/pilot.sock
+  IDENTITY_PATH: /home/pilot/identity.json
+  RENDEZVOUS_REGISTRY: rendezvous:9000
+  RENDEZVOUS_BEACON: rendezvous:9001
+
+volumes:
+  caller-run:   # caller daemon IPC socket, shared with the smoke-test client
+
+services:
+
+  rendezvous:
+    image: pilot-protocol/pilot:dev
+    command: ["rendezvous", "-registry-addr", ":9000", "-beacon-addr", ":9001", "-http", ":3000", "-store", "/home/pilot/reg.json", "-log-level", "info"]
+    environment: { HOME: /home/pilot }
+    networks: [pilot-net]
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:3000/healthz',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 3s
+      timeout: 4s
+      retries: 30
+      start_period: 4s
+
+  otto-relay:
+    image: pilot-protocol/otto-runtime:dev
+    # `otto start --attached` runs the relay daemon in the foreground (so it owns
+    # the container lifecycle). Port 8787 published so the operator's Chrome can pair.
+    command: ["otto", "start", "--attached", "--port", "8787"]
+    environment:
+      HOME: /home/pilot
+      OTTO_RELAY_PORT: "8787"
+      # Pin a non-default JWT secret (the code default is 'dev-only-change-me').
+      OTTO_TOKEN_SECRET: ${OTTO_TOKEN_SECRET:-smoke-only-change-me}
+      # Allow the provider container (non-localhost) to register a controller client.
+      OTTO_ALLOW_REMOTE_CONTROLLER_REGISTRATION: "1"
+    ports:
+      - "127.0.0.1:8787:8787"   # operator's Chrome + otto extension pair here
+    networks: [pilot-net]
+    healthcheck:
+      # No /health route; GET /api/pairing/pending returns 200 unauthenticated.
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:8787/api/pairing/pending',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 3s
+      timeout: 4s
+      retries: 40
+      start_period: 4s
+
+  provider-daemon:
+    image: pilot-protocol/otto-runtime:dev
+    entrypoint: ["/scripts/provider-entrypoint.sh"]
+    environment:
+      <<: *pilot-env
+      HOSTNAME_PILOT: otto-provider
+      LOG_LEVEL: debug
+      APP_BUNDLE: /bundles/io.telepat.otto
+      OTTO_RELAY_WS_URL: ws://otto-relay:8787
+      OTTO_RELAY_HTTP_URL: http://otto-relay:8787
+      # libpilot.so for the sdk-node FFI. Inherited by the supervised app, which
+      # the FFI loader honors first (org/sdk-node/src/ffi.ts:58-62).
+      PILOT_LIB_PATH: /opt/libpilot.so
+    volumes:
+      - ./bundles:/bundles:ro
+      - ./scripts:/scripts:ro
+      - ./build/libpilot.so:/opt/libpilot.so:ro
+    networks: [pilot-net]
+    depends_on:
+      rendezvous: { condition: service_healthy }
+      otto-relay: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /home/pilot/.pilot/apps/io.telepat.otto/app.sock"]
+      interval: 3s
+      timeout: 3s
+      retries: 50
+      start_period: 15s
+
+  caller-daemon:
+    image: pilot-protocol/pilot:dev
+    command: ["pilot-daemon", "-registry", "rendezvous:9000", "-beacon", "rendezvous:9001", "-socket", "/home/pilot/run/pilot.sock", "-identity", "/home/pilot/identity.json", "-public", "-trust-auto-approve", "-hostname", "caller", "-log-level", "debug"]
+    environment:
+      <<: *pilot-env
+      HOSTNAME_PILOT: caller
+    # run as root so the daemon can create its IPC socket inside the (root-owned)
+    # named volume; the smoke-test client (also root) then reads it. Ephemeral test only.
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /home/pilot/run && exec \"$0\" \"$@\""]
+    volumes:
+      - caller-run:/home/pilot/run
+    networks: [pilot-net]
+    depends_on:
+      rendezvous: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /home/pilot/run/pilot.sock"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 6s

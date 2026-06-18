@@ -1,0 +1,82 @@
+# compose.yaml — production topology for the io.telepat.otto node.
+#
+# TWO containers:
+#   otto-relay       — the otto relay daemon (:8787), published so the operator's
+#                      Chrome (with the otto extension) can pair against it.
+#   provider-daemon  — the Pilot node daemon (no_skillinject). Its supervisor
+#                      runs our app, which spawns `otto mcp` in-container and
+#                      drives the relay as an authenticated controller.
+#
+# The node joins Pilot's REAL overlay via PILOT_REGISTRY / PILOT_BEACON (so we do
+# not run a rendezvous ourselves). The browser NODE is the operator's Chrome —
+# there is no headless browser; extract/screenshot need a paired browser (see
+# README "Load + pair the extension").
+name: otto
+
+networks:
+  otto-net:
+    driver: bridge
+
+volumes:
+  provider-home:   # persists the daemon identity + install root across restarts
+  relay-state:     # persists relay token/controller state across restarts
+
+services:
+
+  otto-relay:
+    image: pilot-protocol/otto-runtime:dev
+    command: ["otto", "start", "--attached", "--port", "8787"]
+    environment:
+      HOME: /home/pilot
+      OTTO_RELAY_PORT: "8787"
+      # REQUIRED in prod: pin a strong JWT secret (code default is 'dev-only-change-me').
+      OTTO_TOKEN_SECRET: ${OTTO_TOKEN_SECRET:?set OTTO_TOKEN_SECRET in .env}
+      # Allow the provider container (non-localhost) to register a controller client.
+      OTTO_ALLOW_REMOTE_CONTROLLER_REGISTRATION: "1"
+      # Optional hardening: restrict node WS upgrades to your extension's origin.
+      # OTTO_EXTENSION_ORIGIN: chrome-extension://<your-extension-id>
+    ports:
+      - "${OTTO_RELAY_BIND:-127.0.0.1}:8787:8787"
+    volumes:
+      - relay-state:/home/pilot/.otto
+    networks: [otto-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:8787/api/pairing/pending',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 6s
+
+  provider-daemon:
+    image: pilot-protocol/otto-runtime:dev
+    entrypoint: ["/scripts/provider-entrypoint.sh"]
+    environment:
+      HOME: /home/pilot
+      PILOT_SOCKET: /home/pilot/run/pilot.sock
+      IDENTITY_PATH: /home/pilot/identity.json
+      HOSTNAME_PILOT: ${PILOT_HOSTNAME:-otto-provider}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      APP_BUNDLE: /bundles/io.telepat.otto
+      OTTO_RELAY_WS_URL: ws://otto-relay:8787
+      OTTO_RELAY_HTTP_URL: http://otto-relay:8787
+      # The real Pilot overlay endpoints (the provider-entrypoint passes these to
+      # pilot-daemon as -registry / -beacon). Default to the real Pilot network.
+      RENDEZVOUS_REGISTRY: ${PILOT_REGISTRY:-34.71.57.205:9000}
+      RENDEZVOUS_BEACON: ${PILOT_BEACON:-34.71.57.205:9001}
+      PILOT_LIB_PATH: /opt/libpilot.so
+    volumes:
+      - ./bundles:/bundles:ro
+      - ./scripts:/scripts:ro
+      - ./build/libpilot.so:/opt/libpilot.so:ro
+      - provider-home:/home/pilot
+    networks: [otto-net]
+    depends_on:
+      otto-relay: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /home/pilot/.pilot/apps/io.telepat.otto/app.sock"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s

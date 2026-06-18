@@ -1,0 +1,28 @@
+{
+  "name": "@telepat/otto-app",
+  "version": "0.1.0",
+  "description": "Pilot app-store app: free browser-automation capability wrapping the telepat.io otto agent (extract / screenshot / status) over its stdio MCP.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "otto-app": "bin/main.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "pilotprotocol": "1.10.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
