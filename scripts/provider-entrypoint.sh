@@ -67,8 +67,21 @@ log "configuring controller relay URL"
 otto config --relay-url "${OTTO_RELAY_WS_URL}" >&2
 
 log "registering controller client (fresh, headless)"
-REG_OUT="$(otto client register --name "${CTRL_NAME}" --description "${CTRL_DESC}" 2>&1)" \
-  || die "otto client register failed:\n$(printf '%s' "${REG_OUT}" | sed -E 's/cs_[A-Za-z0-9_-]+/cs_***REDACTED***/g')"
+redact() { sed -E 's/cs_[A-Za-z0-9_-]+/cs_***REDACTED***/g'; }
+REG_OUT="$(otto client register --name "${CTRL_NAME}" --description "${CTRL_DESC}" 2>&1)" || {
+  # If the relay outlived a previous provider, its controller NAME is still
+  # registered → HTTP 409 controller_name_conflict. A provider restart must not
+  # be fatal: retry with a unique name. (A new controller needs a fresh ACL grant
+  # in the extension popup — persist /home/pilot/.otto to avoid that.)
+  if printf '%s' "${REG_OUT}" | grep -q 'controller_name_conflict'; then
+    CTRL_NAME="${CTRL_NAME}-$(date +%s)-${RANDOM}"
+    log "controller name already on the relay; retrying with unique name ${CTRL_NAME}"
+    REG_OUT="$(otto client register --name "${CTRL_NAME}" --description "${CTRL_DESC}" 2>&1)" \
+      || die "otto client register (retry) failed:\n$(printf '%s' "${REG_OUT}" | redact)"
+  else
+    die "otto client register failed:\n$(printf '%s' "${REG_OUT}" | redact)"
+  fi
+}
 # Log register output with the cleartext client secret REDACTED (never log cs_…).
 printf '%s\n' "${REG_OUT}" | sed -E 's/cs_[A-Za-z0-9_-]+/cs_***REDACTED***/g' >&2
 

@@ -152,12 +152,21 @@ function surfaceScreenshot(result: unknown): { imageBase64?: string; format?: st
  *  in-band error envelope so we never report ok:true for a failed op. */
 function envelopeError(result: unknown): string | undefined {
   const r = result as { response?: unknown; error?: unknown } | undefined;
-  const env = (r?.response ?? r) as { messageType?: unknown; payload?: unknown } | undefined;
-  if (env && typeof env === 'object' && env.messageType === 'error') {
-    const p = (env.payload ?? {}) as { code?: unknown; message?: unknown; error?: unknown };
-    const code = typeof p.code === 'string' ? p.code : 'error';
-    const msg = typeof p.message === 'string' ? p.message : typeof p.error === 'string' ? p.error : '';
-    return msg ? `${code}: ${msg}` : code;
+  const env = (r?.response ?? r) as
+    | { messageType?: unknown; payload?: unknown; code?: unknown; message?: unknown; ok?: unknown }
+    | undefined;
+  if (env && typeof env === 'object') {
+    // (a) wrapped envelope: { response: { messageType:"error", payload:{code,message} } }
+    if (env.messageType === 'error') {
+      const p = (env.payload ?? {}) as { code?: unknown; message?: unknown; error?: unknown };
+      const code = typeof p.code === 'string' ? p.code : 'error';
+      const msg = typeof p.message === 'string' ? p.message : typeof p.error === 'string' ? p.error : '';
+      return msg ? `${code}: ${msg}` : code;
+    }
+    // (b) flat command error: { code, message, ok!==true } (e.g. missing_tab_session)
+    if (typeof env.code === 'string' && typeof env.message === 'string' && env.ok !== true) {
+      return `${env.code}: ${env.message}`;
+    }
   }
   if (r && typeof r === 'object' && typeof r.error === 'string') return r.error;
   return undefined;
@@ -272,14 +281,24 @@ async function handleScreenshot(cfg: Config, req: OttoRequest): Promise<OttoResp
   } catch (err) {
     return { op: 'screenshot', ok: false, error: `otto mcp unavailable: ${(err as Error).message}` };
   }
+  // Use the primitive.page.screenshot action (which navigates the URL itself),
+  // NOT the otto_screenshot MCP tool — the latter routes through command.run
+  // 'screenshot' which requires a pre-opened tabSession (missing_tab_session).
+  // This mirrors otto's own CLI screenshot command (cite: cli/index.ts:2593).
   const args: Record<string, unknown> = {
-    url: req.url,
-    ...(req.format ? { format: req.format } : {}),
+    action: 'primitive.page.screenshot',
+    payload: JSON.stringify({
+      url: req.url,
+      mode: 'viewport',
+      format: req.format ?? 'png',
+      quality: 80,
+      maxBytes: 1_500_000,
+    }),
     ...(req.nodeId ? { nodeId: req.nodeId } : {}),
     timeout: req.timeoutMs ?? cfg.defaultTimeoutMs,
   };
   try {
-    const result = await client.callTool('otto_screenshot', args);
+    const result = await client.callTool('otto_cmd', args);
     const inBand = envelopeError(result);
     if (inBand) {
       return { op: 'screenshot', ok: false, url: req.url, error: inBand, result };
